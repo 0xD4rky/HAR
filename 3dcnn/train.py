@@ -47,7 +47,7 @@ def train(log_interval, model, epochs, optimizer, device, train_loader):
     return losses,scores
 
 
-def validation(model,test_loader,epochs,optimizer):
+def validation(model,test_loader,device,optimizer,save_model_path):
     
     model.eval()
     
@@ -59,6 +59,27 @@ def validation(model,test_loader,epochs,optimizer):
         
         for X,y in test_loader:
             
+            X, y = X.to(device), y.to(device).view(-1, )
+            
             outputs = model(X)
             loss = F.cross_entropy(outputs,y, reduction = 'sum')
-            test_loss = l
+            test_loss = loss.item()
+            y_pred = outputs.max(1, keepdim=True)[1]
+            
+            all_y.extend(y)
+            all_ypred.extend(y_pred)
+            
+        
+    test_loss /= len(test_loader.dataset)
+        
+    all_y = torch.stack(all_y, dim=0)
+    all_y_pred = torch.stack(all_y_pred, dim=0)
+    test_score = accuracy_score(all_y.cpu().data.squeeze().numpy(), all_y_pred.cpu().data.squeeze().numpy())
+    
+    print('\nTest set ({:d} samples): Average loss: {:.4f}, Accuracy: {:.2f}%\n'.format(len(all_y), test_loss, 100* test_score))
+    
+    torch.save(model.state_dict(), os.path.join(save_model_path,'3dcnn.pth'))  
+    torch.save(optimizer.state_dict(), os.path.join(save_model_path, '3dcnn.pth'))
+    print("Epoch {} model saved!")
+    
+    return test_loss,test_score
