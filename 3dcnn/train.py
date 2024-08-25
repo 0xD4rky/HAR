@@ -1,85 +1,114 @@
 import os
-import numpy as np
+import argparse
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
-import torchvision.transforms as transforms
-import torch.utils.data as data
-import torchvision
-from torch.autograd import Variable
-import matplotlib.pyplot as plt
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import numpy as np
+from torch.utils.data import Dataset
+
+from utils import save_checkpoint, load_checkpoint, save_dict_to_json
+from arch import CNN3D
 from functions import *
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.metrics import accuracy_score
-import pickle
 
-def train(log_interval, model, epochs, optimizer, device, train_loader):
+
+class Trainer:
     
-    model.train()
-    losses = []
-    scores = []
-    N_count = 0 # total trained sample in one epoch
+    def __init__(self, model, train_loader, val_loader, test_loader, criterion, optimizer, device, config):
         
-    for batch_idx, (X,y) in enumerate(train_loader): # train-loader -> {batch, x,y}
-        
-        X,y = X.to(device), y.to(device).view(-1,)
-        
-        N_count = X.size(0)
-        optimizer.zero_grad()
-        outputs = model(X)
-        loss = F.cross_entropy(outputs,y)
-        losses.append(loss.item())
-        
-        y_pred = torch.max(outputs,1)[1]
-        step_score = accuracy_score(y.cpu().data().squeeze().numpy(), y_pred.cpu().data().squeeze().numpy())
-        scores.append(step_score)
-        
-        loss.backward()
-        optimizer.step()
-        
-        #printing info
-        if (batch_idx + 1) % log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accu: {:.2f}%'.format(
-                epochs + 1, N_count, len(train_loader.dataset), 100. * (batch_idx + 1) / len(train_loader), loss.item(), 100 * step_score))
-
-    return losses,scores
-
-
-def validation(model,test_loader,device,optimizer,save_model_path):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.test_loader = test_loader
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.device = device
+        self.config = config
     
-    model.eval()
-    
-    test_loss = 0
-    all_y = []
-    all_ypred = []
-
-    with torch.no_grad():
+    def train_epoch(self):
         
-        for X,y in test_loader:
+        self.model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        
+        pbar = tqdm(self.train_loader, desc = 'Training', leave = False)
+        for inputs, labels in pbar:
             
-            X, y = X.to(device), y.to(device).view(-1, )
+            inputs, labels = inputs.to(self.device), labels.to(self.device)
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs,labels)
+            loss.backward()
+            self.optimizer.step()
             
-            outputs = model(X)
-            loss = F.cross_entropy(outputs,y, reduction = 'sum')
-            test_loss = loss.item()
-            y_pred = outputs.max(1, keepdim=True)[1]
+            running_loss = loss.item()*inputs.size(0)
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
             
-            all_y.extend(y)
-            all_ypred.extend(y_pred)
+            pbar.set_postfix({'Loss': loss.item(), 'Acc': 100. * correct / total})
             
+        epoch_loss = running_loss / len(self.train_loader.dataset)
+        epoch_acc = 100. * correct / total
+        return epoch_loss, epoch_acc
+    
+    def validate(self):
+        self.model.eval()
+        running_loss = 0.0
+        correct = 0
+        total = 0
         
-    test_loss /= len(test_loader.dataset)
+        with torch.no_grad():
+            pbar = tqdm(self.val_loader, desc='Validating', leave=False)
+            for inputs, labels in pbar:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, labels)
+                
+                running_loss += loss.item() * inputs.size(0)
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
+                
+                pbar.set_postfix({'Loss': loss.item(), 'Acc': 100. * correct / total})
         
-    all_y = torch.stack(all_y, dim=0)
-    all_y_pred = torch.stack(all_y_pred, dim=0)
-    test_score = accuracy_score(all_y.cpu().data.squeeze().numpy(), all_y_pred.cpu().data.squeeze().numpy())
+        epoch_loss = running_loss / len(self.val_dataloader.dataset)
+        epoch_acc = 100. * correct / total
+        return epoch_loss, epoch_acc
     
-    print('\nTest set ({:d} samples): Average loss: {:.4f}, Accuracy: {:.2f}%\n'.format(len(all_y), test_loss, 100* test_score))
-    
-    torch.save(model.state_dict(), os.path.join(save_model_path,'3dcnn.pth'))  
-    torch.save(optimizer.state_dict(), os.path.join(save_model_path, '3dcnn.pth'))
-    print("Epoch {} model saved!")
-    
-    return test_loss,test_score
+    def train_and_evaluate(self):
+        best_val_acc = 0.0
+        
+        for epoch in range(self.config.num_epochs):
+            print(f"Epoch {epoch+1}/{self.config.num_epochs}")
+            
+            train_loss, train_acc = self.train_epoch()
+            val_loss, val_acc = self.validate()
+            
+            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+            
+            is_best = val_acc > best_val_acc
+            best_val_acc = max(val_acc, best_val_acc)
+            
+            # Save checkpoint
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': self.model.state_dict(),
+                'best_acc': best_val_acc,
+                'optimizer': self.optimizer.state_dict(),
+            }, is_best, self.config.checkpoint_dir, self.config.best_model_dir)
+            
+            # Save training metrics
+            save_dict_to_json({
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_acc': train_acc,
+                'val_loss': val_loss,
+                'val_acc': val_acc
+            }, os.path.join(self.config.checkpoint_dir, f'metrics_epoch_{epoch+1}.json'))
+            
+            print()
