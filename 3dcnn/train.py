@@ -75,7 +75,7 @@ class Trainer:
                 
                 pbar.set_postfix({'Loss': loss.item(), 'Acc': 100. * correct / total})
         
-        epoch_loss = running_loss / len(self.val_dataloader.dataset)
+        epoch_loss = running_loss / len(self.val_loader.dataset)
         epoch_acc = 100. * correct / total
         return epoch_loss, epoch_acc
     
@@ -112,3 +112,34 @@ class Trainer:
             }, os.path.join(self.config.checkpoint_dir, f'metrics_epoch_{epoch+1}.json'))
             
             print()
+            
+    def test(self):
+        self.model.eval()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            pbar = tqdm(self.test_loader, desc='Testing', leave=False)
+            for inputs, labels in pbar:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, labels)
+                
+                running_loss += loss.item() * inputs.size(0)
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
+                
+                pbar.set_postfix({'Loss': loss.item(), 'Acc': 100. * correct / total})
+        
+        test_loss = running_loss / len(self.test_loader.dataset)
+        test_acc = 100. * correct / total
+        print(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%")
+        
+        # Save test metrics
+        save_dict_to_json({
+            'test_loss': test_loss,
+            'test_acc': test_acc
+        }, os.path.join(self.config.checkpoint_dir, 'test_metrics.json'))
